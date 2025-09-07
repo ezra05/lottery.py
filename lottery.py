@@ -6,11 +6,17 @@ import pandas as pd
 import logging
 from itertools import combinations
 import random
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
 
 logging.basicConfig(level=logging.INFO)
+
+try:
+    import lightgbm as lgb
+    from sklearn.model_selection import train_test_split
+    from sklearn.metrics import accuracy_score
+    LIGHTGBM_AVAILABLE = True
+except ModuleNotFoundError:
+    LIGHTGBM_AVAILABLE = False
+    logging.error("LightGBM no está instalado. Las funciones de ML no estarán disponibles.")
 
 # URLs oficiales
 DOMINICAN_LOTTERIES = {
@@ -61,12 +67,18 @@ def save_to_csv(name, results):
 def update_all_lotteries():
     for name, url in {**DOMINICAN_LOTTERIES, **AMERICAN_LOTTERIES}.items():
         logging.info(f"Descargando resultados de {name} ...")
-        html = fetch_results_static(url)
-        results = parse_lottery_results_generic(html)
-        save_to_csv(name, results)
+        try:
+            html = fetch_results_static(url)
+            results = parse_lottery_results_generic(html)
+            save_to_csv(name, results)
+        except Exception as e:
+            logging.error(f"Error en {name}: {e}")
 
 def analyze_csv(name):
     filename = f"{name}_results.csv"
+    if not os.path.isfile(filename):
+        logging.error(f"No existe el archivo {filename}. Descarga primero los resultados.")
+        return None
     df = pd.read_csv(filename)
     numbers_series = df["numbers"].str.split(' ').explode()
     freq = numbers_series.value_counts()
@@ -100,5 +112,34 @@ def prepare_ml_data(csv_file):
     y = expand_nums
     return X, y
 
-def train_rf_model(X, y):
-    X_train, X_test, y_train, y_test
+def train_lgb_model(X, y):
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    train_data = lgb.Dataset(X_train, label=y_train)
+    test_data = lgb.Dataset(X_test, label=y_test, reference=train_data)
+    params = {
+        'objective': 'multiclass',
+        'num_class': y.shape[1],
+        'metric': 'multi_logloss',
+        'verbose': -1
+    }
+    model = lgb.train(params, train_data, valid_sets=[test_data], early_stopping_rounds=10)
+    y_pred = model.predict(X_test)
+    y_pred_labels = (y_pred > 0.5).astype(int)
+    accuracy = (y_pred_labels == y_test.values).mean().mean()
+    logging.info(f"LightGBM accuracy: {accuracy:.2f}")
+    return model
+
+if __name__ == "__main__":
+    update_all_lotteries()
+
+    freq = analyze_csv("GanaMas")
+    if freq is not None:
+        combos_random = generate_random_combinations(36, 5, freq, count=5)
+        logging.info(f"Combinaciones aleatorias sugeridas para GanaMas:\n{combos_random}")
+
+        if LIGHTGBM_AVAILABLE:
+            csv_file = "GanaMas_results.csv"
+            X, y = prepare_ml_data(csv_file)
+            model = train_lgb_model(X, y)
+        else:
+            logging.warning("No se puede entrenar el modelo ML porque LightGBM no está disponible.")
